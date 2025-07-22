@@ -56,7 +56,6 @@ const DeathWheel = ({ wheelState, onSpin, canSpin, playerName }) => {
       }}>
         {fields.map((field, index) => {
           const angle = (360 / totalFields) * index;
-          const nextAngle = (360 / totalFields) * (index + 1);
           
           return (
             <div
@@ -70,7 +69,6 @@ const DeathWheel = ({ wheelState, onSpin, canSpin, playerName }) => {
                 transformOrigin: '0 0',
                 transform: `rotate(${angle}deg)`,
                 backgroundColor: field.color,
-                height: '98px'
               }}
             >
               <div style={{

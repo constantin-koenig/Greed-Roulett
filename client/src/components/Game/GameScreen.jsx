@@ -1,7 +1,9 @@
+// client/src/components/Game/GameScreen.jsx - Complete functional version
 import React, { useState, useEffect } from 'react';
 import PlayerBoard from './PlayerBoard';
 import DeathWheel from './DeathWheel';
 import RoundStatus from './RoundStatus';
+import ReflexClickGame from './ReflexClickGame';
 
 const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => {
   const [players, setPlayers] = useState(lobby?.players || []);
@@ -9,12 +11,15 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
   const [needsToSpin, setNeedsToSpin] = useState(false);
   const [spinResults, setSpinResults] = useState([]);
   const [roundPhase, setRoundPhase] = useState('preparation'); // 'preparation', 'minigame', 'spinning', 'results'
+  const [currentMinigame, setCurrentMinigame] = useState(null);
 
   const currentPlayer = players.find(p => p._id === playerId);
+  const isHost = currentPlayer?.isHost || false;
 
   useEffect(() => {
     if (!socket) return;
 
+    // Existing socket listeners
     socket.on('playerX2Updated', (data) => {
       setPlayers(prevPlayers => 
         prevPlayers.map(p => 
@@ -58,91 +63,545 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
       alert(`Game Over! Winner: ${data.winner?.name || 'No one'}`);
     });
 
+    // Minigame socket listeners
+    socket.on('minigameStarted', (data) => {
+      console.log('Minigame started:', data);
+      if (data.type === 'reflexClick') {
+        setCurrentMinigame('reflexClick');
+        setRoundPhase('minigame');
+      }
+    });
+
+    socket.on('minigameResult', (data) => {
+      console.log('Minigame result:', data);
+      // Handle minigame results - award bonus life to winner
+      if (data.type === 'reflexClick' && data.winnerId) {
+        setPlayers(prevPlayers => 
+          prevPlayers.map(p => 
+            p._id === data.winnerId 
+              ? { ...p, lives: p.lives + 1 }
+              : p
+          )
+        );
+        
+        // Show notification
+        if (data.winnerId === playerId) {
+          setTimeout(() => {
+            alert('🎉 You won the reflex game! +1 Life!');
+          }, 100);
+        }
+      }
+    });
+
+    // Player readiness
+    socket.on('playerReady', (data) => {
+      console.log('Player ready:', data);
+    });
+
     return () => {
+      // Cleanup all listeners
       socket.off('playerX2Updated');
       socket.off('spinResult');
       socket.off('roundEnd');
       socket.off('gameEnded');
+      socket.off('minigameStarted');
+      socket.off('minigameResult');
+      socket.off('playerReady');
     };
   }, [socket, playerId]);
 
+  // Start Reflex Click minigame (host only)
+  const startReflexGame = () => {
+    if (!isHost) {
+      alert('Only the host can start minigames!');
+      return;
+    }
+
+    socket.emit('startMinigame', {
+      roomId: lobby.code,
+      type: 'reflexClick'
+    });
+  };
+
+  // Skip minigame and go directly to spinning phase
+  const skipToSpinning = () => {
+    if (!isHost) {
+      alert('Only the host can control game phases!');
+      return;
+    }
+    setRoundPhase('spinning');
+  };
+
+  // Handle minigame end
+  const handleMinigameEnd = (result) => {
+    console.log('Minigame ended:', result);
+    setCurrentMinigame(null);
+    setRoundPhase('spinning');
+  };
+
   const handleActivateX2 = () => {
+    if (!currentPlayer?.isAlive) {
+      alert('Only alive players can activate X2!');
+      return;
+    }
     socket.emit('activateX2');
   };
 
-  const handlePlayerSpin = () => {
+  const handleSpin = () => {
+    if (!currentPlayer?.isAlive) {
+      alert('Only alive players can spin!');
+      return;
+    }
+    if (needsToSpin) {
+      alert('Please wait for the current spin to complete!');
+      return;
+    }
+    
+    setNeedsToSpin(true);
     socket.emit('playerSpin');
   };
 
-  const getWheelState = () => {
-    return lobby?.deathWheel || { redFields: 1, greenFields: 4, bonusFields: 0 };
+  const handleBackToLobby = () => {
+      socket.emit('leaveLobby');
+      onBackToMenu();
   };
 
-  const getPlayerNeedingToSpin = () => {
-    // Logic to determine who needs to spin based on round losers
-    // For now, simplified to check if current player is alive and needs to spin
-    return currentPlayer?.isAlive && needsToSpin;
+  const handleReadyNextRound = () => {
+    socket.emit('readyNextRound');
   };
+
+  // Render minigame if active
+  if (currentMinigame === 'reflexClick') {
+    return (
+      <div style={{ padding: '20px', minHeight: '100vh', backgroundColor: '#f5f5f5' }}>
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'space-between', 
+          alignItems: 'center',
+          marginBottom: '20px',
+          padding: '15px',
+          backgroundColor: '#1a1a1a',
+          color: 'white',
+          borderRadius: '8px'
+        }}>
+          <div>
+            <h2 style={{ margin: 0, color: '#4CAF50' }}>Round {lobby.currentRound} - Reflex Challenge</h2>
+            <p style={{ margin: '5px 0 0 0', opacity: 0.8 }}>
+              Get ready for the ultimate reflex test!
+            </p>
+          </div>
+          <button 
+            onClick={handleBackToLobby} 
+            style={{ 
+              padding: '8px 16px',
+              backgroundColor: '#f44336',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}
+          >
+            Leave Game
+          </button>
+        </div>
+
+        <ReflexClickGame
+          socket={socket}
+          roomId={lobby.code}
+          playerId={playerId}
+          onGameEnd={handleMinigameEnd}
+        />
+      </div>
+    );
+  }
+
+  if (!lobby) {
+    return (
+      <div style={{ padding: '20px', textAlign: 'center' }}>
+        <h2>Loading game...</h2>
+        <p>Please wait while the game data loads.</p>
+      </div>
+    );
+  }
+
+  const alivePlayers = players.filter(p => p.isAlive);
+  const deadPlayers = players.filter(p => !p.isAlive);
 
   return (
-    <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        <h1>🎰 Greed Roulette - Round {lobby?.currentRound}</h1>
-        <button onClick={onBackToMenu} style={{ padding: '8px 16px' }}>
-          Leave Game
-        </button>
+    <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto', minHeight: '100vh' }}>
+      {/* Header */}
+      <div style={{ 
+        display: 'flex', 
+        justifyContent: 'space-between', 
+        alignItems: 'center',
+        marginBottom: '20px',
+        padding: '15px',
+        backgroundColor: '#1a1a1a',
+        color: 'white',
+        borderRadius: '8px'
+      }}>
+        <div>
+          <h1 style={{ margin: 0, color: '#ff6b6b' }}>Greed Roulette</h1>
+          <p style={{ margin: '5px 0 0 0', opacity: 0.8 }}>
+            Lobby: {lobby.name} | Round {lobby.currentRound}
+          </p>
+          <p style={{ margin: '2px 0 0 0', fontSize: '14px', opacity: 0.7 }}>
+            Alive: {alivePlayers.length} | Dead: {deadPlayers.length}
+          </p>
+        </div>
+        
+        {/* Game Controls */}
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+          {isHost && roundPhase === 'preparation' && (
+            <>
+              <button 
+                onClick={startReflexGame}
+                style={{
+                  padding: '10px 15px',
+                  backgroundColor: '#4CAF50',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '5px',
+                  cursor: 'pointer',
+                  fontSize: '14px'
+                }}
+              >
+                🎯 Start Reflex Game
+              </button>
+              <button 
+                onClick={skipToSpinning}
+                style={{
+                  padding: '10px 15px',
+                  backgroundColor: '#ff9800',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '5px',
+                  cursor: 'pointer',
+                  fontSize: '14px'
+                }}
+              >
+                ⚡ Skip to Wheel
+              </button>
+            </>
+          )}
+          
+          <button 
+            onClick={handleBackToLobby} 
+            style={{ 
+              padding: '10px 15px',
+              backgroundColor: '#f44336',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}
+          >
+            Leave Game
+          </button>
+        </div>
       </div>
 
+      {/* Round Status */}
       <RoundStatus 
-        lobby={lobby}
-        currentRound={currentRound}
         roundPhase={roundPhase}
+        currentRound={lobby.currentRound}
         players={players}
       />
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px', marginTop: '20px' }}>
+      {/* Phase-specific Messages */}
+      {roundPhase === 'preparation' && isHost && (
+        <div style={{
+          padding: '15px',
+          backgroundColor: '#fff3e0',
+          border: '2px solid #ff9800',
+          borderRadius: '8px',
+          textAlign: 'center',
+          marginBottom: '20px'
+        }}>
+          <h3 style={{ margin: '0 0 10px 0', color: '#ef6c00' }}>
+            🎯 Round Preparation - Host Controls
+          </h3>
+          <p style={{ margin: '0 0 10px 0', color: '#e65100' }}>
+            Start a minigame to award bonus lives, or skip directly to the death wheel!
+          </p>
+          <p style={{ margin: 0, fontSize: '14px', color: '#bf360c' }}>
+            Minigames can change the course of the game - use them strategically!
+          </p>
+        </div>
+      )}
+
+      {roundPhase === 'preparation' && !isHost && (
+        <div style={{
+          padding: '15px',
+          backgroundColor: '#f3e5f5',
+          border: '2px solid #9c27b0',
+          borderRadius: '8px',
+          textAlign: 'center',
+          marginBottom: '20px'
+        }}>
+          <h3 style={{ margin: '0 0 10px 0', color: '#7b1fa2' }}>
+            ⏳ Waiting for Host Decision
+          </h3>
+          <p style={{ margin: 0, color: '#4a148c' }}>
+            The host is deciding whether to start a minigame or proceed to the death wheel...
+          </p>
+        </div>
+      )}
+
+      {roundPhase === 'minigame' && (
+        <div style={{
+          padding: '15px',
+          backgroundColor: '#e8f5e8',
+          border: '2px solid #4CAF50',
+          borderRadius: '8px',
+          textAlign: 'center',
+          marginBottom: '20px'
+        }}>
+          <h3 style={{ margin: '0 0 10px 0', color: '#2e7d32' }}>
+            🎮 Minigame in Progress
+          </h3>
+          <p style={{ margin: 0, color: '#1b5e20' }}>
+            Complete the challenge to earn rewards and advantages!
+          </p>
+        </div>
+      )}
+
+      {/* Main Game Area */}
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '20px', marginBottom: '20px' }}>
+        {/* Players Board */}
         <div>
-          <h2>Players</h2>
-          <PlayerBoard 
-            players={players}
-            currentPlayerId={playerId}
-            onActivateX2={handleActivateX2}
-            x2Allowed={lobby?.gameSettings?.x2RiskAllowed}
-          />
+          <h2 style={{ color: '#333', marginBottom: '15px' }}>
+            Players ({players.length})
+          </h2>
+          
+          {/* Alive Players */}
+          {alivePlayers.length > 0 && (
+            <div style={{ marginBottom: '20px' }}>
+              <h3 style={{ color: '#4CAF50', marginBottom: '10px' }}>
+                ❤️ Alive ({alivePlayers.length})
+              </h3>
+              <div style={{ display: 'grid', gap: '10px' }}>
+                {alivePlayers.map(player => (
+                  <PlayerBoard 
+                    key={player._id}
+                    player={player}
+                    isCurrentPlayer={player._id === playerId}
+                    currentRound={lobby.currentRound}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Dead Players */}
+          {deadPlayers.length > 0 && (
+            <div>
+              <h3 style={{ color: '#f44336', marginBottom: '10px' }}>
+                💀 Eliminated ({deadPlayers.length})
+              </h3>
+              <div style={{ display: 'grid', gap: '10px' }}>
+                {deadPlayers.map(player => (
+                  <PlayerBoard 
+                    key={player._id}
+                    player={player}
+                    isCurrentPlayer={player._id === playerId}
+                    currentRound={lobby.currentRound}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
+        {/* Death Wheel & Actions */}
         <div>
           <DeathWheel 
-            wheelState={getWheelState()}
-            onSpin={handlePlayerSpin}
-            canSpin={getPlayerNeedingToSpin()}
-            playerName={currentPlayer?.name}
+            deathWheelState={lobby.deathWheel}
+            currentPlayer={currentPlayer}
           />
+          
+          {/* Player Actions */}
+          {currentPlayer?.isAlive && roundPhase === 'spinning' && (
+            <div style={{ marginTop: '20px', textAlign: 'center' }}>
+              <h3 style={{ marginBottom: '15px', color: '#333' }}>Your Turn</h3>
+              
+              {/* X2 Risk Button */}
+              {lobby.gameSettings.x2RiskAllowed && (
+                <div style={{ marginBottom: '15px' }}>
+                  <button
+                    onClick={handleActivateX2}
+                    disabled={currentPlayer.hasX2Active}
+                    style={{
+                      padding: '12px 20px',
+                      backgroundColor: currentPlayer.hasX2Active ? '#ff4444' : '#ffaa00',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: currentPlayer.hasX2Active ? 'not-allowed' : 'pointer',
+                      fontSize: '16px',
+                      fontWeight: 'bold',
+                      width: '100%',
+                      marginBottom: '10px'
+                    }}
+                  >
+                    {currentPlayer.hasX2Active ? '❌ X2 RISK ACTIVE' : '⚡ Activate X2 Risk'}
+                  </button>
+                  <p style={{ 
+                    fontSize: '12px', 
+                    color: currentPlayer.hasX2Active ? '#d32f2f' : '#f57c00',
+                    margin: '5px 0'
+                  }}>
+                    {currentPlayer.hasX2Active 
+                      ? 'Double risk: Lose 2 lives if you hit death!' 
+                      : 'Double the risk, double the reward potential!'
+                    }
+                  </p>
+                </div>
+              )}
+              
+              {/* Spin Button */}
+              <button
+                onClick={handleSpin}
+                disabled={needsToSpin}
+                style={{
+                  padding: '20px 30px',
+                  fontSize: '20px',
+                  fontWeight: 'bold',
+                  backgroundColor: needsToSpin ? '#666' : '#4CAF50',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: needsToSpin ? 'not-allowed' : 'pointer',
+                  width: '100%',
+                  boxShadow: needsToSpin ? 'none' : '0 4px 8px rgba(76, 175, 80, 0.3)',
+                  transition: 'all 0.3s ease'
+                }}
+              >
+                {needsToSpin ? '🎰 Spinning...' : '🎰 SPIN THE WHEEL'}
+              </button>
+              
+              <p style={{ 
+                marginTop: '10px', 
+                fontSize: '14px', 
+                color: '#666',
+                fontStyle: 'italic'
+              }}>
+                Lives: {currentPlayer.lives} ❤️
+              </p>
+            </div>
+          )}
+
+          {/* Spectator Message */}
+          {!currentPlayer?.isAlive && (
+            <div style={{ 
+              marginTop: '20px', 
+              padding: '15px',
+              backgroundColor: '#ffebee',
+              border: '2px solid #f44336',
+              borderRadius: '8px',
+              textAlign: 'center'
+            }}>
+              <h3 style={{ margin: '0 0 10px 0', color: '#d32f2f' }}>
+                💀 You are eliminated
+              </h3>
+              <p style={{ margin: 0, color: '#c62828' }}>
+                Watch the remaining players battle it out!
+              </p>
+            </div>
+          )}
+
+          {/* Ready for Next Round */}
+          {roundPhase === 'results' && currentPlayer?.isAlive && (
+            <div style={{ 
+              marginTop: '20px',
+              padding: '15px',
+              backgroundColor: '#e3f2fd',
+              border: '2px solid',
+              borderRadius: '8px',
+              textAlign: 'center'
+            }}>
+              <h3 style={{ margin: '0 0 15px 0', color: '#1976d2' }}>
+                Round Complete
+              </h3>
+              <button
+                onClick={handleReadyNextRound}
+                style={{
+                  padding: '12px 20px',
+                  backgroundColor: '#2196F3',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  fontSize: '16px',
+                  width: '100%'
+                }}
+              >
+                ✅ Ready for Next Round
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
+      {/* Spin Results History */}
       {spinResults.length > 0 && (
-        <div style={{ marginTop: '30px' }}>
-          <h3>Recent Spins</h3>
-          <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid #ddd', padding: '10px' }}>
-            {spinResults.slice(-10).map((result, index) => {
+        <div style={{ 
+          marginTop: '20px',
+          padding: '20px',
+          backgroundColor: '#f8f9fa',
+          borderRadius: '8px',
+          border: '1px solid #e9ecef'
+        }}>
+          <h3 style={{ marginTop: 0, color: '#495057' }}>Recent Spins</h3>
+          <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+            {spinResults.slice(-10).reverse().map((result, index) => {
               const player = players.find(p => p._id === result.playerId);
               return (
-                <div key={index} style={{ padding: '5px 0', borderBottom: '1px solid #eee' }}>
-                  <strong>{player?.name}</strong> spun: 
-                  <span style={{ 
-                    color: result.result === 'death' ? '#f44336' : 
-                          result.result === 'bonus' ? '#ff9800' : '#4caf50',
-                    marginLeft: '8px'
-                  }}>
-                    {result.result === 'death' ? '💀 Death' : 
-                     result.result === 'bonus' ? '❤️ Bonus Life' : '✅ Safe'}
+                <div key={index} style={{ 
+                  padding: '10px', 
+                  margin: '8px 0',
+                  backgroundColor: 'white',
+                  borderRadius: '6px',
+                  border: '1px solid #dee2e6',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <span style={{ fontWeight: 'bold' }}>
+                    {player?.name || 'Unknown Player'}
                   </span>
-                  {result.livesLost > 0 && (
-                    <span style={{ color: '#f44336', marginLeft: '8px' }}>
-                      (-{result.livesLost} ❤️)
+                  
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ 
+                      padding: '4px 8px',
+                      borderRadius: '4px',
+                      fontSize: '14px',
+                      fontWeight: 'bold',
+                      backgroundColor: 
+                        result.result === 'death' ? '#ffebee' : 
+                        result.result === 'bonus' ? '#fff3e0' : '#e8f5e8',
+                      color: 
+                        result.result === 'death' ? '#d32f2f' : 
+                        result.result === 'bonus' ? '#f57c00' : '#2e7d32'
+                    }}>
+                      {result.result === 'death' ? '💀 Death' : 
+                       result.result === 'bonus' ? '❤️ Bonus' : '✅ Safe'}
                     </span>
-                  )}
+                    
+                    {result.livesLost > 0 && (
+                      <span style={{ 
+                        color: '#d32f2f', 
+                        fontSize: '14px',
+                        fontWeight: 'bold'
+                      }}>
+                        -{result.livesLost} ❤️
+                      </span>
+                    )}
+                    
+                    <span style={{ fontSize: '12px', color: '#6c757d' }}>
+                      → {result.newLives} ❤️
+                    </span>
+                  </div>
                 </div>
               );
             })}
@@ -150,6 +609,7 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
         </div>
       )}
 
+      {/* Game Over Modal */}
       {gameState === 'Ended' && (
         <div style={{ 
           position: 'fixed', 
@@ -160,18 +620,42 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
           backgroundColor: 'rgba(0,0,0,0.8)', 
           display: 'flex', 
           alignItems: 'center', 
-          justifyContent: 'center' 
+          justifyContent: 'center',
+          zIndex: 1000
         }}>
           <div style={{ 
             backgroundColor: 'white', 
             padding: '40px', 
-            borderRadius: '8px', 
-            textAlign: 'center' 
+            borderRadius: '12px', 
+            textAlign: 'center',
+            minWidth: '400px',
+            boxShadow: '0 10px 25px rgba(0,0,0,0.3)'
           }}>
-            <h2>🏆 Game Over!</h2>
-            <p>Thanks for playing Greed Roulette!</p>
-            <button onClick={onBackToMenu} style={{ padding: '12px 24px', marginTop: '20px' }}>
-              Back to Menu
+            <div style={{ fontSize: '64px', marginBottom: '20px' }}>🏆</div>
+            <h2 style={{ color: '#1a1a1a', marginBottom: '15px' }}>
+              Game Over!
+            </h2>
+            <p style={{ fontSize: '18px', color: '#666', marginBottom: '10px' }}>
+              Thanks for playing Greed Roulette!
+            </p>
+            <p style={{ fontSize: '16px', color: '#888', marginBottom: '30px' }}>
+              May the odds be ever in your favor next time!
+            </p>
+            <button 
+              onClick={onBackToMenu} 
+              style={{ 
+                padding: '15px 30px', 
+                fontSize: '16px',
+                fontWeight: 'bold',
+                backgroundColor: '#4CAF50',
+                color: 'white',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                boxShadow: '0 4px 8px rgba(76, 175, 80, 0.3)'
+              }}
+            >
+              🏠 Back to Menu
             </button>
           </div>
         </div>

@@ -1,29 +1,34 @@
-// server/services/SocketEvents.js
+// server/services/SocketEvents.js - Updated with Reflex Click Integration
 const { Player, Lobby, GameRound } = require('../models');
 const GameEngine = require('./GameEngine');
 const DeathWheel = require('./DeathWheel');
+const { setupReflexClickHandlers } = require('./ReflexClickMinigame');
 
 class SocketEvents {
   constructor(io) {
     this.io = io;
     this.gameEngine = new GameEngine();
     this.deathWheel = new DeathWheel();
+    this.roomGames = new Map(); // NEW: Store minigames per room
   }
 
   handleConnection(socket) {
     console.log(`User connected: ${socket.id}`);
 
-    // Lobby Events
+    // Existing Lobby Events
     socket.on('createLobby', this.handleCreateLobby.bind(this, socket));
     socket.on('joinLobby', this.handleJoinLobby.bind(this, socket));
     socket.on('leaveLobby', this.handleLeaveLobby.bind(this, socket));
     socket.on('updateGameSettings', this.handleUpdateGameSettings.bind(this, socket));
     
-    // Game Events
+    // Existing Game Events
     socket.on('startGame', this.handleStartGame.bind(this, socket));
     socket.on('activateX2', this.handleActivateX2.bind(this, socket));
     socket.on('playerSpin', this.handlePlayerSpin.bind(this, socket));
     socket.on('readyNextRound', this.handleReadyNextRound.bind(this, socket));
+    
+    // NEW: Setup Reflex Click Minigame Handlers
+    setupReflexClickHandlers(this.io, socket, this.roomGames);
     
     // Connection Events
     socket.on('disconnect', this.handleDisconnect.bind(this, socket));
@@ -133,9 +138,18 @@ class SocketEvents {
       lobby.players = lobby.players.filter(p => !p._id.equals(player._id));
       
       if (lobby.players.length === 0) {
-        // Delete empty lobby
+        // Delete empty lobby and cleanup minigames
         await Lobby.findByIdAndDelete(lobby._id);
         await Player.deleteMany({ lobbyId: lobby._id });
+        
+        // NEW: Cleanup any active minigames for this room
+        if (this.roomGames.has(socket.lobbyCode)) {
+          const gamesMap = this.roomGames.get(socket.lobbyCode);
+          gamesMap.forEach(game => {
+            if (game.cleanup) game.cleanup();
+          });
+          this.roomGames.delete(socket.lobbyCode);
+        }
       } else if (player.isHost) {
         // Transfer host to another player
         const newHost = lobby.players[0];
@@ -208,8 +222,8 @@ class SocketEvents {
       
       const lobbyData = await this.getLobbyData(lobby);
       
-      // Notify all players in lobby
-      this.io.to(socket.lobbyCode).emit('gameSettingsUpdated', {
+      this.io.to(socket.lobbyCode).emit('gameSettingsUpdated', { 
+        gameSettings: lobby.gameSettings,
         lobby: lobbyData
       });
       
@@ -221,59 +235,50 @@ class SocketEvents {
   async handleActivateX2(socket) {
     try {
       const player = await Player.findById(socket.playerId);
-      if (!player || !player.isAlive) return;
+      if (!player) return;
       
       const lobby = await Lobby.findById(player.lobbyId);
+      if (lobby.gameState !== 'InProgress') {
+        socket.emit('error', { message: 'Game not in progress' });
+        return;
+      }
+      
       if (!lobby.gameSettings.x2RiskAllowed) {
-        socket.emit('error', { message: 'X2 risk not allowed in this lobby' });
+        socket.emit('error', { message: 'X2 risk not allowed in this game' });
         return;
       }
       
       player.hasX2Active = !player.hasX2Active;
       await player.save();
       
-      socket.to(socket.lobbyCode).emit('playerX2Updated', {
+      this.io.to(socket.lobbyCode).emit('playerX2Updated', {
         playerId: player._id,
         hasX2Active: player.hasX2Active
       });
-      
-      socket.emit('x2Updated', { hasX2Active: player.hasX2Active });
       
     } catch (error) {
       socket.emit('error', { message: 'Failed to toggle X2', error: error.message });
     }
   }
 
-  async handleReadyNextRound(socket) {
-    try {
-      const player = await Player.findById(socket.playerId);
-      if (!player) return;
-      
-      // Logic for handling ready state for next round
-      // This can be expanded based on game requirements
-      
-      socket.emit('readyStateUpdated', { ready: true });
-      
-    } catch (error) {
-      socket.emit('error', { message: 'Failed to update ready state', error: error.message });
-    }
-  }
-
   async handlePlayerSpin(socket) {
     try {
       const player = await Player.findById(socket.playerId);
-      if (!player || !player.isAlive) return;
-      
-      const lobby = await Lobby.findById(player.lobbyId);
-      const result = this.deathWheel.spin(lobby.deathWheel);
-      
-      // Update death wheel - make it more dangerous
-      if (lobby.deathWheel.greenFields > 0) {
-        lobby.deathWheel.greenFields--;
-        lobby.deathWheel.redFields++;
+      if (!player || !player.isAlive) {
+        socket.emit('error', { message: 'Player cannot spin' });
+        return;
       }
       
-      // Process spin result
+      const lobby = await Lobby.findById(player.lobbyId);
+      if (lobby.gameState !== 'InProgress') {
+        socket.emit('error', { message: 'Game not in progress' });
+        return;
+      }
+      
+      // Spin the death wheel
+      const result = this.deathWheel.spin(lobby.deathWheel);
+      
+      // Calculate lives lost
       let livesLost = 0;
       if (result === 'death') {
         livesLost = player.hasX2Active ? 2 : 1;
@@ -316,8 +321,49 @@ class SocketEvents {
     }
   }
 
+  async handleReadyNextRound(socket) {
+    try {
+      const player = await Player.findById(socket.playerId);
+      if (!player) return;
+      
+      player.isReadyForNextRound = true;
+      await player.save();
+      
+      const lobby = await Lobby.findById(player.lobbyId).populate('players');
+      const alivePlayers = lobby.players.filter(p => p.isAlive);
+      const readyPlayers = alivePlayers.filter(p => p.isReadyForNextRound);
+      
+      this.io.to(socket.lobbyCode).emit('playerReady', {
+        playerId: player._id,
+        readyCount: readyPlayers.length,
+        totalAlive: alivePlayers.length
+      });
+      
+      // Start next round if all alive players are ready
+      if (readyPlayers.length === alivePlayers.length && alivePlayers.length > 1) {
+        await this.gameEngine.startNewRound(lobby);
+      }
+      
+    } catch (error) {
+      socket.emit('error', { message: 'Failed to ready up', error: error.message });
+    }
+  }
+
   async handleDisconnect(socket) {
     console.log(`User disconnected: ${socket.id}`);
+    
+    // NEW: Remove player from any active minigames
+    if (socket.playerId && socket.lobbyCode) {
+      const roomGamesMap = this.roomGames.get(socket.lobbyCode);
+      if (roomGamesMap) {
+        roomGamesMap.forEach(game => {
+          if (game.removePlayer) {
+            game.removePlayer(socket.playerId);
+          }
+        });
+      }
+    }
+    
     await this.handleLeaveLobby(socket);
   }
 
