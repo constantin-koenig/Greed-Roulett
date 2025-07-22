@@ -1,4 +1,4 @@
-// server/services/ReflexClickMinigame.js
+// server/services/ReflexClickMinigame.js - Enhanced with Death Wheel Integration
 // Reflex Click Minigame Server Logic for Greed Roulette
 
 class ReflexClickGame {
@@ -13,6 +13,8 @@ class ReflexClickGame {
     this.gameTimeout = null;
     this.enableTimeout = null;
     this.roundStartTime = null;
+    this.overallWinner = null;
+    this.finalResults = null;
   }
 
   // Spieler zum Spiel hinzufügen
@@ -40,6 +42,8 @@ class ReflexClickGame {
 
     this.currentRound = 1;
     this.roundWinners = [];
+    this.overallWinner = null;
+    this.finalResults = null;
     
     // Reset all players
     this.players.forEach(player => {
@@ -120,8 +124,6 @@ class ReflexClickGame {
     });
 
     console.log(`Sending enableClick event for round ${this.currentRound}`);
-
-    console.log(`Reflex Click Round ${this.currentRound} button enabled!`);
   }
 
   // Klick-Versuch verarbeiten
@@ -225,8 +227,6 @@ class ReflexClickGame {
 
     this.io.to(this.roomId).emit('roundResult', roundResult);
 
-    console.log(`Sending roundResult event for round ${this.currentRound - 1}, winner: ${roundWinnerId}`);
-
     // Zur nächsten Runde oder Spiel beenden
     this.currentRound++;
     
@@ -270,13 +270,16 @@ class ReflexClickGame {
       }
     });
 
+    this.overallWinner = overallWinner;
+    this.finalResults = this.getFinalPlayerResults();
+
     // Finale Ergebnisse senden
     const finalResult = {
       type: 'reflexClick',
       winnerId: overallWinner,
       maxPoints: maxPoints,
       allPlayerIds: Array.from(this.players.keys()),
-      playerResults: this.getFinalPlayerResults(),
+      playerResults: this.finalResults,
       roundWinners: this.roundWinners,
       message: overallWinner ? `${overallWinner} wins the Reflex Challenge with ${maxPoints} points!` : 'No overall winner!'
     };
@@ -284,6 +287,38 @@ class ReflexClickGame {
     this.io.to(this.roomId).emit('minigameResult', finalResult);
 
     console.log(`Reflex Click minigame ended. Overall winner: ${overallWinner || 'none'} with ${maxPoints} points`);
+
+    // NEW: Automatically trigger death wheel phase after 5 seconds
+    setTimeout(() => {
+      this.triggerDeathWheelPhase();
+    }, 5000);
+  }
+
+  // NEW: Trigger death wheel phase for non-winners
+  triggerDeathWheelPhase() {
+    const losers = [];
+    const winner = this.overallWinner;
+    
+    // Collect all players who didn't win the minigame
+    this.players.forEach((player, playerId) => {
+      if (playerId !== winner) {
+        losers.push(playerId);
+      }
+    });
+
+    console.log(`Triggering death wheel phase. Winner: ${winner}, Losers: ${losers.length}`);
+
+    // Emit death wheel phase start
+    this.io.to(this.roomId).emit('deathWheelPhase', {
+      type: 'reflexClick',
+      winnerId: winner,
+      losers: losers,
+      currentSpinner: losers.length > 0 ? losers[0] : null,
+      total: losers.length,
+      message: losers.length > 0 ? 
+        `${losers.length} player${losers.length > 1 ? 's' : ''} must face the death wheel!` :
+        'No players need to spin - everyone survived!'
+    });
   }
 
   // Hole Runden-Ergebnisse für alle Spieler
@@ -435,14 +470,3 @@ module.exports = {
   ReflexClickGame,
   setupReflexClickHandlers
 };
-
-// Integration in existing SocketEvents.js:
-/*
-const { setupReflexClickHandlers } = require('./ReflexClickMinigame');
-
-// In SocketEvents constructor:
-this.roomGames = new Map(); // roomId -> Map(gameType -> gameInstance)
-
-// In handleConnection method, add:
-setupReflexClickHandlers(this.io, socket, this.roomGames);
-*/
