@@ -10,11 +10,24 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
   const [gameState, setGameState] = useState(lobby?.gameState || 'InProgress');
   const [needsToSpin, setNeedsToSpin] = useState(false);
   const [spinResults, setSpinResults] = useState([]);
-  const [roundPhase, setRoundPhase] = useState('preparation'); // 'preparation', 'minigame', 'spinning', 'results'
+  const [roundPhase, setRoundPhase] = useState('preparation');
   const [currentMinigame, setCurrentMinigame] = useState(null);
 
-  const currentPlayer = players.find(p => p._id === playerId);
+  const [showLeaveModal, setShowLeaveModal] = useState(false);
+
+  // Robust null checks
+  const safePlayers = Array.isArray(players) ? players : [];
+  const currentPlayer = safePlayers.find(p => p && p._id === playerId);
   const isHost = currentPlayer?.isHost || false;
+
+  // Safe lobby data with defaults
+  const safeLobby = lobby || {
+    name: 'Unknown Lobby',
+    code: 'XXXXXX',
+    currentRound: 1,
+    gameSettings: {},
+    deathWheel: { redFields: 1, greenFields: 4, bonusFields: 0 }
+  };
 
   useEffect(() => {
     if (!socket) return;
@@ -77,17 +90,17 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
       // Handle minigame results - award bonus life to winner
       if (data.type === 'reflexClick' && data.winnerId) {
         setPlayers(prevPlayers => 
-          prevPlayers.map(p => 
-            p._id === data.winnerId 
-              ? { ...p, lives: p.lives + 1 }
+          Array.isArray(prevPlayers) ? prevPlayers.map(p => 
+            p && p._id === data.winnerId 
+              ? { ...p, lives: (p.lives || 0) + 1 }
               : p
-          )
+          ) : []
         );
         
         // Show notification
         if (data.winnerId === playerId) {
           setTimeout(() => {
-            alert('🎉 You won the reflex game! +1 Life!');
+            alert('🎉 You won the reflex challenge! +1 Life!');
           }, 100);
         }
       }
@@ -118,7 +131,7 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
     }
 
     socket.emit('startMinigame', {
-      roomId: lobby.code,
+      roomId: safeLobby.code,
       type: 'reflexClick'
     });
   };
@@ -162,8 +175,17 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
   };
 
   const handleBackToLobby = () => {
-      socket.emit('leaveLobby');
-      onBackToMenu();
+    setShowLeaveModal(true);
+  };
+
+  const confirmLeave = () => {
+    socket.emit('leaveLobby');
+    onBackToMenu();
+    setShowLeaveModal(false);
+  };
+
+  const cancelLeave = () => {
+    setShowLeaveModal(false);
   };
 
   const handleReadyNextRound = () => {
@@ -185,7 +207,7 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
           borderRadius: '8px'
         }}>
           <div>
-            <h2 style={{ margin: 0, color: '#4CAF50' }}>Round {lobby.currentRound} - Reflex Challenge</h2>
+            <h2 style={{ margin: 0, color: '#4CAF50' }}>Round {safeLobby.currentRound} - Reflex Challenge</h2>
             <p style={{ margin: '5px 0 0 0', opacity: 0.8 }}>
               Get ready for the ultimate reflex test!
             </p>
@@ -207,25 +229,45 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
 
         <ReflexClickGame
           socket={socket}
-          roomId={lobby.code}
+          roomId={safeLobby.code}
           playerId={playerId}
           onGameEnd={handleMinigameEnd}
         />
+        
+        {/* Debug Info */}
+        <div style={{ 
+          position: 'fixed', 
+          top: '10px', 
+          right: '10px', 
+          backgroundColor: 'rgba(0,0,0,0.8)', 
+          color: 'white', 
+          padding: '10px', 
+          borderRadius: '5px',
+          fontSize: '12px',
+          zIndex: 1000
+        }}>
+          <div>Room: {safeLobby.code}</div>
+          <div>Player: {playerId}</div>
+          <div>Socket: {socket ? 'Connected' : 'Disconnected'}</div>
+        </div>
       </div>
     );
   }
 
-  if (!lobby) {
+  if (!safeLobby || !socket) {
     return (
       <div style={{ padding: '20px', textAlign: 'center' }}>
         <h2>Loading game...</h2>
         <p>Please wait while the game data loads.</p>
+        <button onClick={onBackToMenu} style={{ marginTop: '20px', padding: '10px 20px' }}>
+          Back to Menu
+        </button>
       </div>
     );
   }
 
-  const alivePlayers = players.filter(p => p.isAlive);
-  const deadPlayers = players.filter(p => !p.isAlive);
+  const alivePlayers = safePlayers.filter(p => p && p.isAlive);
+  const deadPlayers = safePlayers.filter(p => p && !p.isAlive);
 
   return (
     <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto', minHeight: '100vh' }}>
@@ -243,7 +285,7 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
         <div>
           <h1 style={{ margin: 0, color: '#ff6b6b' }}>Greed Roulette</h1>
           <p style={{ margin: '5px 0 0 0', opacity: 0.8 }}>
-            Lobby: {lobby.name} | Round {lobby.currentRound}
+            Lobby: {safeLobby.name} | Round {safeLobby.currentRound}
           </p>
           <p style={{ margin: '2px 0 0 0', fontSize: '14px', opacity: 0.7 }}>
             Alive: {alivePlayers.length} | Dead: {deadPlayers.length}
@@ -302,11 +344,13 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
       </div>
 
       {/* Round Status */}
-      <RoundStatus 
-        roundPhase={roundPhase}
-        currentRound={lobby.currentRound}
-        players={players}
-      />
+      {RoundStatus && (
+        <RoundStatus 
+          roundPhase={roundPhase}
+          currentRound={safeLobby.currentRound}
+          players={safePlayers}
+        />
+      )}
 
       {/* Phase-specific Messages */}
       {roundPhase === 'preparation' && isHost && (
@@ -381,14 +425,15 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
                 ❤️ Alive ({alivePlayers.length})
               </h3>
               <div style={{ display: 'grid', gap: '10px' }}>
-                {alivePlayers.map(player => (
+                {alivePlayers.map(player => player && player._id ? (
                   <PlayerBoard 
                     key={player._id}
                     player={player}
                     isCurrentPlayer={player._id === playerId}
-                    currentRound={lobby.currentRound}
+                    currentRound={safeLobby.currentRound}
+                    onActivateX2={player._id === playerId ? handleActivateX2 : null}
                   />
-                ))}
+                ) : null)}
               </div>
             </div>
           )}
@@ -400,14 +445,15 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
                 💀 Eliminated ({deadPlayers.length})
               </h3>
               <div style={{ display: 'grid', gap: '10px' }}>
-                {deadPlayers.map(player => (
+                {deadPlayers.map(player => player && player._id ? (
                   <PlayerBoard 
                     key={player._id}
                     player={player}
                     isCurrentPlayer={player._id === playerId}
-                    currentRound={lobby.currentRound}
+                    currentRound={safeLobby.currentRound}
+                    onActivateX2={null}
                   />
-                ))}
+                ) : null)}
               </div>
             </div>
           )}
@@ -416,48 +462,14 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
         {/* Death Wheel & Actions */}
         <div>
           <DeathWheel 
-            deathWheelState={lobby.deathWheel}
-            currentPlayer={currentPlayer}
+            deathWheelState={safeLobby.deathWheel}
+            currentPlayer={currentPlayer || null}
           />
           
           {/* Player Actions */}
           {currentPlayer?.isAlive && roundPhase === 'spinning' && (
             <div style={{ marginTop: '20px', textAlign: 'center' }}>
               <h3 style={{ marginBottom: '15px', color: '#333' }}>Your Turn</h3>
-              
-              {/* X2 Risk Button */}
-              {lobby.gameSettings.x2RiskAllowed && (
-                <div style={{ marginBottom: '15px' }}>
-                  <button
-                    onClick={handleActivateX2}
-                    disabled={currentPlayer.hasX2Active}
-                    style={{
-                      padding: '12px 20px',
-                      backgroundColor: currentPlayer.hasX2Active ? '#ff4444' : '#ffaa00',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '6px',
-                      cursor: currentPlayer.hasX2Active ? 'not-allowed' : 'pointer',
-                      fontSize: '16px',
-                      fontWeight: 'bold',
-                      width: '100%',
-                      marginBottom: '10px'
-                    }}
-                  >
-                    {currentPlayer.hasX2Active ? '❌ X2 RISK ACTIVE' : '⚡ Activate X2 Risk'}
-                  </button>
-                  <p style={{ 
-                    fontSize: '12px', 
-                    color: currentPlayer.hasX2Active ? '#d32f2f' : '#f57c00',
-                    margin: '5px 0'
-                  }}>
-                    {currentPlayer.hasX2Active 
-                      ? 'Double risk: Lose 2 lives if you hit death!' 
-                      : 'Double the risk, double the reward potential!'
-                    }
-                  </p>
-                </div>
-              )}
               
               {/* Spin Button */}
               <button
@@ -486,7 +498,7 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
                 color: '#666',
                 fontStyle: 'italic'
               }}>
-                Lives: {currentPlayer.lives} ❤️
+                Lives: {currentPlayer.lives} ❤️ | X2 Risk: {currentPlayer.hasX2Active ? 'ON' : 'OFF'}
               </p>
             </div>
           )}
@@ -516,7 +528,7 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
               marginTop: '20px',
               padding: '15px',
               backgroundColor: '#e3f2fd',
-              border: '2px solid',
+              border: '2px solid #2196f3',
               borderRadius: '8px',
               textAlign: 'center'
             }}>
@@ -555,7 +567,7 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
           <h3 style={{ marginTop: 0, color: '#495057' }}>Recent Spins</h3>
           <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
             {spinResults.slice(-10).reverse().map((result, index) => {
-              const player = players.find(p => p._id === result.playerId);
+              const player = safePlayers.find(p => p && p._id === result.playerId);
               return (
                 <div key={index} style={{ 
                   padding: '10px', 
@@ -605,6 +617,69 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* Leave Game Confirmation Modal */}
+      {showLeaveModal && (
+        <div style={{ 
+          position: 'fixed', 
+          top: 0, 
+          left: 0, 
+          right: 0, 
+          bottom: 0, 
+          backgroundColor: 'rgba(0,0,0,0.7)', 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'center',
+          zIndex: 1001
+        }}>
+          <div style={{ 
+            backgroundColor: 'white', 
+            padding: '30px', 
+            borderRadius: '12px', 
+            textAlign: 'center',
+            minWidth: '350px',
+            boxShadow: '0 10px 25px rgba(0,0,0,0.3)'
+          }}>
+            <div style={{ fontSize: '48px', marginBottom: '15px' }}>⚠️</div>
+            <h3 style={{ color: '#1a1a1a', marginBottom: '15px' }}>
+              Leave Game?
+            </h3>
+            <p style={{ fontSize: '16px', color: '#666', marginBottom: '25px' }}>
+              Are you sure you want to leave the game? Your progress will be lost.
+            </p>
+            <div style={{ display: 'flex', gap: '15px', justifyContent: 'center' }}>
+              <button 
+                onClick={cancelLeave}
+                style={{ 
+                  padding: '12px 20px', 
+                  fontSize: '16px',
+                  backgroundColor: '#6c757d',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={confirmLeave}
+                style={{ 
+                  padding: '12px 20px', 
+                  fontSize: '16px',
+                  backgroundColor: '#dc3545',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer'
+                }}
+              >
+                Leave Game
+              </button>
+            </div>
           </div>
         </div>
       )}

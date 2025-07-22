@@ -3,19 +3,27 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
 const ReflexClickGame = ({ socket, roomId, playerId, onGameEnd }) => {
-  const [gameState, setGameState] = useState('waiting'); // 'waiting', 'countdown', 'active', 'finished'
+  const [gameState, setGameState] = useState('waiting'); // 'waiting', 'countdown', 'active', 'roundResult', 'finished'
   const [message, setMessage] = useState('Waiting for game to start...');
   const [canClick, setCanClick] = useState(false);
   const [hasClicked, setHasClicked] = useState(false);
   const [result, setResult] = useState(null);
   const [startTime, setStartTime] = useState(null);
   const [clickTime, setClickTime] = useState(null);
+  const [currentRound, setCurrentRound] = useState(1);
+  const [maxRounds, setMaxRounds] = useState(3);
+  const [roundResults, setRoundResults] = useState([]);
+  const [eliminated, setEliminated] = useState(false);
 
   // Game start handler
   const handleGameStart = useCallback((data) => {
     console.log('Minigame started:', data);
-    setGameState('countdown');
-    setMessage(data.message || 'Get ready! Click when the button becomes active!');
+    setGameState('waiting');
+    setMessage('Reflex Click Challenge started! Get ready for 3 rounds...');
+    setCurrentRound(1);
+    setMaxRounds(3);
+    setRoundResults([]);
+    setEliminated(false);
     setCanClick(false);
     setHasClicked(false);
     setResult(null);
@@ -23,22 +31,74 @@ const ReflexClickGame = ({ socket, roomId, playerId, onGameEnd }) => {
     setClickTime(null);
   }, []);
 
+  // Round start handler
+  const handleRoundStart = useCallback((data) => {
+    console.log('Round started:', data);
+    setGameState('countdown');
+    setCurrentRound(data.round);
+    setMaxRounds(data.maxRounds);
+    setMessage(data.message || `Round ${data.round}/${data.maxRounds}: Get ready!`);
+    setCanClick(false);
+    setHasClicked(false);
+    setStartTime(null);
+    setClickTime(null);
+  }, []);
+
   // Enable click handler
   const handleEnableClick = useCallback((data) => {
     console.log('Click enabled:', data);
-    setGameState('active');
-    setMessage('CLICK NOW!');
-    setCanClick(true);
-    setStartTime(data.timestamp || Date.now());
-  }, []);
+    if (!eliminated) {
+      setGameState('active');
+      setMessage('CLICK NOW!');
+      setCanClick(true);
+      setStartTime(data.timestamp || Date.now());
+    }
+  }, [eliminated]);
 
   // Too early click handler
   const handleClickTooEarly = useCallback((data) => {
     console.log('Clicked too early:', data);
-    setMessage(data.message || 'Too early! You are disqualified.');
+    setMessage(data.message || 'Too early! You are eliminated.');
     setCanClick(false);
     setHasClicked(true);
+    setEliminated(true);
   }, []);
+
+  // Round result handler
+  const handleRoundResult = useCallback((data) => {
+    console.log('Round result:', data);
+    setGameState('roundResult');
+    setCanClick(false);
+
+    const myResult = data.allPlayerResults?.[playerId];
+    if (myResult) {
+      const roundResult = {
+        round: data.round,
+        result: myResult.roundResult?.result || 'noClick',
+        reactionTime: myResult.roundResult?.reactionTime,
+        points: myResult.points,
+        wasWinner: data.roundWinnerId === playerId
+      };
+
+      setRoundResults(prev => [...prev, roundResult]);
+
+      if (roundResult.wasWinner) {
+        setMessage(`🎉 You won Round ${data.round}!`);
+      } else if (roundResult.result === 'late') {
+        setMessage(`Round ${data.round}: Too slow, but you're still in!`);
+      } else if (roundResult.result === 'noClick') {
+        setMessage(`Round ${data.round}: You didn't click in time!`);
+      }
+    }
+
+    // Show round results for a moment
+    setTimeout(() => {
+      if (data.round < data.maxRounds && !eliminated) {
+        setGameState('waiting');
+        setMessage(`Preparing Round ${data.round + 1}...`);
+      }
+    }, 2000);
+  }, [playerId, eliminated]);
 
   // Game result handler
   const handleGameResult = useCallback((data) => {
@@ -47,16 +107,18 @@ const ReflexClickGame = ({ socket, roomId, playerId, onGameEnd }) => {
     setCanClick(false);
     
     const isWinner = data.winnerId === playerId;
-    const winnerName = data.winnerId || 'No one';
+    const myFinalResult = data.playerResults?.[playerId];
     
     setResult({
       isWinner,
       winnerId: data.winnerId,
-      message: data.message || `${winnerName} won!`,
-      reactionTime: clickTime && startTime ? clickTime - startTime : null
+      message: data.message || `Game Over!`,
+      totalPoints: myFinalResult?.totalPoints || 0,
+      roundsWon: myFinalResult?.roundsWon || 0,
+      finalRanking: isWinner ? 1 : null
     });
 
-    setMessage(isWinner ? '🎉 You won!' : `${winnerName} won the reflex game!`);
+    setMessage(isWinner ? '🏆 You won the entire challenge!' : `Game Over! Winner: ${data.winnerId}`);
 
     // Auto-hide after 5 seconds
     setTimeout(() => {
@@ -64,24 +126,61 @@ const ReflexClickGame = ({ socket, roomId, playerId, onGameEnd }) => {
         onGameEnd(data);
       }
     }, 5000);
-  }, [playerId, clickTime, startTime, onGameEnd]);
+  }, [playerId, onGameEnd]);
 
   // Setup socket listeners
   useEffect(() => {
     if (!socket) return;
 
-    socket.on('minigameStarted', handleGameStart);
-    socket.on('enableClick', handleEnableClick);
-    socket.on('clickTooEarly', handleClickTooEarly);
-    socket.on('minigameResult', handleGameResult);
+    console.log('ReflexClickGame: Setting up socket listeners');
+
+    const handleGameStartDebug = (data) => {
+      console.log('ReflexClickGame: Received minigameStarted:', data);
+      handleGameStart(data);
+    };
+
+    const handleRoundStartDebug = (data) => {
+      console.log('ReflexClickGame: Received roundStarted:', data);
+      handleRoundStart(data);
+    };
+
+    const handleEnableClickDebug = (data) => {
+      console.log('ReflexClickGame: Received enableClick:', data);
+      handleEnableClick(data);
+    };
+
+    const handleClickTooEarlyDebug = (data) => {
+      console.log('ReflexClickGame: Received clickTooEarly:', data);
+      handleClickTooEarly(data);
+    };
+
+    const handleRoundResultDebug = (data) => {
+      console.log('ReflexClickGame: Received roundResult:', data);
+      handleRoundResult(data);
+    };
+
+    const handleGameResultDebug = (data) => {
+      console.log('ReflexClickGame: Received minigameResult:', data);
+      handleGameResult(data);
+    };
+
+    socket.on('minigameStarted', handleGameStartDebug);
+    socket.on('roundStarted', handleRoundStartDebug);
+    socket.on('enableClick', handleEnableClickDebug);
+    socket.on('clickTooEarly', handleClickTooEarlyDebug);
+    socket.on('roundResult', handleRoundResultDebug);
+    socket.on('minigameResult', handleGameResultDebug);
 
     return () => {
-      socket.off('minigameStarted', handleGameStart);
-      socket.off('enableClick', handleEnableClick);
-      socket.off('clickTooEarly', handleClickTooEarly);
-      socket.off('minigameResult', handleGameResult);
+      console.log('ReflexClickGame: Cleaning up socket listeners');
+      socket.off('minigameStarted', handleGameStartDebug);
+      socket.off('roundStarted', handleRoundStartDebug);
+      socket.off('enableClick', handleEnableClickDebug);
+      socket.off('clickTooEarly', handleClickTooEarlyDebug);
+      socket.off('roundResult', handleRoundResultDebug);
+      socket.off('minigameResult', handleGameResultDebug);
     };
-  }, [socket, handleGameStart, handleEnableClick, handleClickTooEarly, handleGameResult]);
+  }, [socket, handleGameStart, handleRoundStart, handleEnableClick, handleClickTooEarly, handleRoundResult, handleGameResult]);
 
   // Handle click attempt
   const handleClick = useCallback(() => {
@@ -110,6 +209,8 @@ const ReflexClickGame = ({ socket, roomId, playerId, onGameEnd }) => {
       return;
     }
 
+    console.log('ReflexClickGame: Starting game with roomId:', roomId);
+
     socket.emit('startMinigame', {
       roomId,
       type: 'reflexClick'
@@ -125,15 +226,23 @@ const ReflexClickGame = ({ socket, roomId, playerId, onGameEnd }) => {
       border: 'none',
       fontSize: '18px',
       fontWeight: 'bold',
-      cursor: canClick ? 'pointer' : 'not-allowed',
+      cursor: canClick && !eliminated ? 'pointer' : 'not-allowed',
       transition: 'all 0.2s ease',
       boxShadow: '0 4px 8px rgba(0,0,0,0.2)'
     };
 
+    if (eliminated) {
+      return {
+        ...baseStyle,
+        backgroundColor: '#666',
+        color: 'white'
+      };
+    }
+
     if (gameState === 'waiting') {
       return {
         ...baseStyle,
-        backgroundColor: '#gray',
+        backgroundColor: '#2196f3',
         color: 'white'
       };
     }
@@ -165,11 +274,13 @@ const ReflexClickGame = ({ socket, roomId, playerId, onGameEnd }) => {
   };
 
   const getButtonText = () => {
-    if (gameState === 'waiting') return 'Waiting...';
+    if (eliminated) return 'Eliminated';
+    if (gameState === 'waiting') return `Round ${currentRound}`;
     if (gameState === 'countdown') return 'Wait...';
     if (gameState === 'active' && canClick) return 'CLICK!';
+    if (gameState === 'roundResult') return 'Round Over';
     if (hasClicked) return 'Clicked!';
-    return 'Disabled';
+    return 'Ready';
   };
 
   return (
@@ -195,28 +306,83 @@ const ReflexClickGame = ({ socket, roomId, playerId, onGameEnd }) => {
       </style>
       
       <h2 style={{ marginBottom: '20px', color: '#333' }}>
-        Reflex Click Challenge
+        Reflex Click Challenge - 3 Rounds
       </h2>
+      
+      {/* Round Progress */}
+      <div style={{
+        marginBottom: '20px',
+        padding: '15px',
+        backgroundColor: '#f0f0f0',
+        borderRadius: '8px',
+        border: '2px solid #ddd'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ margin: 0, color: '#555' }}>
+            Round {currentRound} of {maxRounds}
+          </h3>
+          <div style={{ display: 'flex', gap: '5px' }}>
+            {[1, 2, 3].map(round => (
+              <div
+                key={round}
+                style={{
+                  width: '30px',
+                  height: '30px',
+                  borderRadius: '50%',
+                  backgroundColor: 
+                    roundResults.find(r => r.round === round)?.wasWinner ? '#4CAF50' :
+                    roundResults.find(r => r.round === round) ? '#ff9800' :
+                    round === currentRound ? '#2196f3' : '#ddd',
+                  color: 'white',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '12px',
+                  fontWeight: 'bold'
+                }}
+              >
+                {roundResults.find(r => r.round === round)?.wasWinner ? '🏆' :
+                 roundResults.find(r => r.round === round) ? '✓' :
+                 round}
+              </div>
+            ))}
+          </div>
+        </div>
+        
+        {/* Score Display */}
+        {roundResults.length > 0 && (
+          <div style={{ marginTop: '10px', fontSize: '14px', color: '#666' }}>
+            Your Score: {roundResults.reduce((sum, r) => sum + (r.points || 0), 0)} points | 
+            Rounds Won: {roundResults.filter(r => r.wasWinner).length}
+            {eliminated && <span style={{ color: '#f44336', fontWeight: 'bold' }}> - ELIMINATED</span>}
+          </div>
+        )}
+      </div>
       
       <p style={{ 
         fontSize: '18px', 
         marginBottom: '30px', 
         textAlign: 'center',
-        color: gameState === 'active' ? '#ff6600' : '#666',
-        fontWeight: gameState === 'active' ? 'bold' : 'normal'
+        color: 
+          gameState === 'active' ? '#ff6600' : 
+          eliminated ? '#f44336' : 
+          gameState === 'roundResult' ? '#4CAF50' : '#666',
+        fontWeight: 
+          gameState === 'active' ? 'bold' : 
+          gameState === 'roundResult' ? 'bold' : 'normal'
       }}>
         {message}
       </p>
 
       <button
         onClick={handleClick}
-        disabled={!canClick}
+        disabled={!canClick || eliminated}
         style={getButtonStyle()}
       >
         {getButtonText()}
       </button>
 
-      {gameState === 'waiting' && (
+      {gameState === 'waiting' && currentRound === 1 && (
         <button
           onClick={startGame}
           style={{
@@ -230,46 +396,130 @@ const ReflexClickGame = ({ socket, roomId, playerId, onGameEnd }) => {
             cursor: 'pointer'
           }}
         >
-          Start Game
+          Start 3-Round Challenge
         </button>
+      )}
+
+      {/* Round Results Summary */}
+      {roundResults.length > 0 && (
+        <div style={{
+          marginTop: '20px',
+          padding: '15px',
+          backgroundColor: '#f8f9fa',
+          border: '1px solid #e9ecef',
+          borderRadius: '8px'
+        }}>
+          <h4 style={{ margin: '0 0 10px 0', color: '#495057' }}>Round Results</h4>
+          {roundResults.map((roundResult, index) => (
+            <div key={index} style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '8px 0',
+              borderBottom: index < roundResults.length - 1 ? '1px solid #e9ecef' : 'none'
+            }}>
+              <span style={{ fontWeight: 'bold' }}>
+                Round {roundResult.round}:
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                {roundResult.wasWinner && <span style={{ color: '#4CAF50' }}>🏆 WON</span>}
+                {roundResult.result === 'late' && <span style={{ color: '#ff9800' }}>⏰ Late</span>}
+                {roundResult.result === 'eliminated' && <span style={{ color: '#f44336' }}>❌ Eliminated</span>}
+                {roundResult.result === 'noClick' && <span style={{ color: '#666' }}>⭕ No Click</span>}
+                {roundResult.reactionTime && (
+                  <span style={{ fontSize: '12px', color: '#666' }}>
+                    {roundResult.reactionTime}ms
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
       )}
 
       {result && (
         <div style={{
           marginTop: '20px',
-          padding: '15px',
+          padding: '20px',
           backgroundColor: result.isWinner ? '#d4edda' : '#f8d7da',
-          border: `1px solid ${result.isWinner ? '#c3e6cb' : '#f5c6cb'}`,
-          borderRadius: '5px',
+          border: `2px solid ${result.isWinner ? '#c3e6cb' : '#f5c6cb'}`,
+          borderRadius: '8px',
           textAlign: 'center'
         }}>
           <h3 style={{ 
-            margin: '0 0 10px 0',
-            color: result.isWinner ? '#155724' : '#721c24'
+            margin: '0 0 15px 0',
+            color: result.isWinner ? '#155724' : '#721c24',
+            fontSize: '24px'
           }}>
-            {result.isWinner ? '🏆 Victory!' : '😔 Better luck next time!'}
+            {result.isWinner ? '🏆 CHAMPION!' : '🎮 Game Complete!'}
           </h3>
           
-          {result.reactionTime && (
-            <p style={{ margin: '5px 0', fontSize: '14px' }}>
-              Your reaction time: {result.reactionTime}ms
-            </p>
-          )}
+          <div style={{ marginBottom: '15px' }}>
+            <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '5px' }}>
+              Final Score: {result.totalPoints || 0} points
+            </div>
+            <div style={{ fontSize: '16px', marginBottom: '5px' }}>
+              Rounds Won: {result.roundsWon || 0}/3
+            </div>
+          </div>
           
-          <p style={{ margin: '5px 0', fontSize: '14px' }}>
+          <p style={{ margin: '10px 0', fontSize: '16px' }}>
             {result.message}
           </p>
+          
+          {result.isWinner && (
+            <div style={{
+              padding: '10px',
+              backgroundColor: 'rgba(255, 215, 0, 0.3)',
+              borderRadius: '6px',
+              marginTop: '10px'
+            }}>
+              🎉 Congratulations! You dominated the reflex challenge! 🎉
+            </div>
+          )}
         </div>
       )}
 
-      {gameState === 'countdown' && (
+      {(gameState === 'countdown' || gameState === 'waiting') && !eliminated && (
         <div style={{
           marginTop: '15px',
           fontSize: '14px',
           color: '#666',
           textAlign: 'center'
         }}>
-          ⚠️ Don't click too early or you'll be disqualified!
+          {gameState === 'countdown' ? (
+            <>
+              ⚠️ Don't click too early or you'll be eliminated from the entire challenge!
+              <br />
+              💡 Wait for the button to turn green before clicking
+            </>
+          ) : (
+            <>
+              🎯 Best of 3 rounds - Win the most rounds to become champion!
+              <br />
+              ⚡ Each round win = 3 points | Too early = elimination
+            </>
+          )}
+        </div>
+      )}
+
+      {eliminated && (
+        <div style={{
+          marginTop: '15px',
+          padding: '15px',
+          backgroundColor: '#ffebee',
+          border: '2px solid #f44336',
+          borderRadius: '8px',
+          textAlign: 'center'
+        }}>
+          <h4 style={{ margin: '0 0 10px 0', color: '#d32f2f' }}>
+            💀 Eliminated!
+          </h4>
+          <p style={{ margin: 0, fontSize: '14px', color: '#c62828' }}>
+            You clicked too early and have been eliminated from the challenge.
+            <br />
+            Watch the remaining players compete for victory!
+          </p>
         </div>
       )}
     </div>

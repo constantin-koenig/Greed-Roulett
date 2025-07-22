@@ -6,10 +6,13 @@ class ReflexClickGame {
     this.io = io;
     this.roomId = roomId;
     this.gameState = 'waiting'; // 'waiting', 'countdown', 'active', 'finished'
-    this.players = new Map(); // playerId -> { id, socketId, hasClicked }
-    this.winnerId = null;
+    this.players = new Map(); // playerId -> { id, socketId, hasClicked, points, roundResults }
+    this.currentRound = 1;
+    this.maxRounds = 3;
+    this.roundWinners = []; // Store winners of each round
     this.gameTimeout = null;
     this.enableTimeout = null;
+    this.roundStartTime = null;
   }
 
   // Spieler zum Spiel hinzufügen
@@ -17,7 +20,10 @@ class ReflexClickGame {
     this.players.set(playerId, {
       id: playerId,
       socketId: socketId,
-      hasClicked: false
+      hasClicked: false,
+      points: 0,
+      roundResults: [], // Track results for each round
+      eliminatedInRound: null
     });
   }
 
@@ -32,23 +38,61 @@ class ReflexClickGame {
       return false;
     }
 
-    // Reset game state
-    this.gameState = 'countdown';
-    this.winnerId = null;
+    this.currentRound = 1;
+    this.roundWinners = [];
+    
+    // Reset all players
     this.players.forEach(player => {
       player.hasClicked = false;
+      player.points = 0;
+      player.roundResults = [];
+      player.eliminatedInRound = null;
     });
 
-    // Benachrichtige alle Spieler über Spielstart
+    // Sende initial game started event
     this.io.to(this.roomId).emit('minigameStarted', {
       type: 'reflexClick',
-      message: 'Get ready! Click when the button becomes active!'
+      message: 'Reflex Click Challenge started! Get ready for 3 rounds...',
+      maxRounds: this.maxRounds
     });
+
+    // Starte erste Runde nach kurzer Verzögerung
+    setTimeout(() => {
+      this.startRound();
+    }, 2000);
+
+    return true;
+  }
+
+  // Neue Runde starten
+  startRound() {
+    if (this.currentRound > this.maxRounds) {
+      this.endGame();
+      return;
+    }
+
+    // Reset für neue Runde
+    this.gameState = 'countdown';
+    this.players.forEach(player => {
+      if (!player.eliminatedInRound) { // Nur aktive Spieler
+        player.hasClicked = false;
+      }
+    });
+
+    // Benachrichtige alle Spieler über Rundenbeginn
+    this.io.to(this.roomId).emit('roundStarted', {
+      type: 'reflexClick',
+      round: this.currentRound,
+      maxRounds: this.maxRounds,
+      message: `Round ${this.currentRound}/${this.maxRounds}: Get ready! Click when the button becomes active!`
+    });
+
+    console.log(`Sending roundStarted event for round ${this.currentRound}`);
 
     // Zufällige Verzögerung zwischen 1-5 Sekunden
     const delay = Math.random() * 4000 + 1000; // 1000-5000ms
 
-    console.log(`Reflex Click starting in ${Math.round(delay)}ms`);
+    console.log(`Reflex Click Round ${this.currentRound} starting in ${Math.round(delay)}ms`);
 
     this.enableTimeout = setTimeout(() => {
       this.enableClick();
@@ -56,10 +100,8 @@ class ReflexClickGame {
 
     // Timeout nach 10 Sekunden falls niemand klickt
     this.gameTimeout = setTimeout(() => {
-      this.endGame(null);
+      this.endRound(null);
     }, delay + 10000);
-
-    return true;
   }
 
   // Button aktivieren
@@ -69,31 +111,50 @@ class ReflexClickGame {
     }
 
     this.gameState = 'active';
+    this.roundStartTime = Date.now();
     
     // Button für alle aktivieren
     this.io.to(this.roomId).emit('enableClick', {
-      timestamp: Date.now()
+      timestamp: this.roundStartTime,
+      round: this.currentRound
     });
 
-    console.log('Reflex Click button enabled!');
+    console.log(`Sending enableClick event for round ${this.currentRound}`);
+
+    console.log(`Reflex Click Round ${this.currentRound} button enabled!`);
   }
 
   // Klick-Versuch verarbeiten
-  handleClickAttempt(playerId, socketId) {
+  handleClickAttempt(playerId, socketId, clickTime) {
     const player = this.players.get(playerId);
     
     if (!player || player.socketId !== socketId) {
       return false;
     }
 
+    // Prüfe ob Spieler bereits eliminiert ist
+    if (player.eliminatedInRound) {
+      return false;
+    }
+
     // Prüfe Spielstatus
     if (this.gameState === 'countdown') {
-      // Zu früh geklickt - Spieler verliert
+      // Zu früh geklickt - Spieler wird eliminiert
       player.hasClicked = true;
-      this.io.to(socketId).emit('clickTooEarly', {
-        message: 'Too early! You are disqualified.'
+      player.eliminatedInRound = this.currentRound;
+      player.roundResults.push({
+        round: this.currentRound,
+        result: 'eliminated',
+        reason: 'tooEarly',
+        reactionTime: null
       });
-      console.log(`Player ${playerId} clicked too early`);
+
+      this.io.to(socketId).emit('clickTooEarly', {
+        message: 'Too early! You are eliminated from this minigame.',
+        round: this.currentRound
+      });
+      
+      console.log(`Player ${playerId} eliminated in round ${this.currentRound} for clicking too early`);
       return false;
     }
 
@@ -105,26 +166,88 @@ class ReflexClickGame {
       return false; // Bereits geklickt
     }
 
-    // Erster gültiger Klick!
+    // Gültiger Klick!
     player.hasClicked = true;
+    const reactionTime = clickTime ? clickTime - this.roundStartTime : null;
     
-    if (!this.winnerId) {
-      this.winnerId = playerId;
-      this.endGame(playerId);
-      console.log(`Player ${playerId} won the reflex game!`);
+    // Prüfe ob das der erste Klick in dieser Runde ist
+    const roundWinner = this.roundWinners.find(w => w.round === this.currentRound);
+    if (!roundWinner) {
+      // Erster Klick = Rundengewinner
+      this.roundWinners.push({
+        round: this.currentRound,
+        playerId: playerId,
+        reactionTime: reactionTime
+      });
+      
+      player.points += 3; // 3 Punkte für Rundensieg
+      player.roundResults.push({
+        round: this.currentRound,
+        result: 'winner',
+        reactionTime: reactionTime
+      });
+      
+      this.endRound(playerId);
+      console.log(`Player ${playerId} won round ${this.currentRound} with ${reactionTime}ms!`);
+    } else {
+      // Zu spät - kein Gewinn aber auch nicht eliminiert
+      player.roundResults.push({
+        round: this.currentRound,
+        result: 'late',
+        reactionTime: reactionTime
+      });
     }
 
     return true;
   }
 
-  // Spiel beenden
-  endGame(winnerId) {
-    if (this.gameState === 'finished') {
-      return;
+  // Runde beenden
+  endRound(roundWinnerId) {
+    // Timeouts clearen
+    if (this.enableTimeout) {
+      clearTimeout(this.enableTimeout);
+      this.enableTimeout = null;
+    }
+    if (this.gameTimeout) {
+      clearTimeout(this.gameTimeout);
+      this.gameTimeout = null;
     }
 
+    // Runden-Ergebnis senden
+    const roundResult = {
+      type: 'reflexClick',
+      round: this.currentRound,
+      maxRounds: this.maxRounds,
+      roundWinnerId: roundWinnerId,
+      allPlayerResults: this.getRoundPlayerResults(),
+      message: roundWinnerId ? `Round ${this.currentRound} Winner: Player ${roundWinnerId}!` : `Round ${this.currentRound}: No winner - time ran out!`
+    };
+
+    this.io.to(this.roomId).emit('roundResult', roundResult);
+
+    console.log(`Sending roundResult event for round ${this.currentRound - 1}, winner: ${roundWinnerId}`);
+
+    // Zur nächsten Runde oder Spiel beenden
+    this.currentRound++;
+    
+    if (this.currentRound <= this.maxRounds) {
+      // Kurze Pause zwischen Runden
+      setTimeout(() => {
+        this.startRound();
+      }, 2000);
+    } else {
+      // Spiel ist zu Ende
+      setTimeout(() => {
+        this.endGame();
+      }, 3000);
+    }
+
+    console.log(`Round ${this.currentRound - 1} ended. Winner: ${roundWinnerId || 'none'}`);
+  }
+
+  // Spiel beenden
+  endGame() {
     this.gameState = 'finished';
-    this.winnerId = winnerId;
 
     // Timeouts clearen
     if (this.enableTimeout) {
@@ -136,17 +259,60 @@ class ReflexClickGame {
       this.gameTimeout = null;
     }
 
-    // Ergebnis an alle senden
-    const allPlayerIds = Array.from(this.players.keys());
+    // Berechne Gesamtsieger (meiste Punkte)
+    let overallWinner = null;
+    let maxPoints = 0;
     
-    this.io.to(this.roomId).emit('minigameResult', {
-      type: 'reflexClick',
-      winnerId: winnerId,
-      allPlayerIds: allPlayerIds,
-      message: winnerId ? `Player ${winnerId} won!` : 'No winner - time ran out!'
+    this.players.forEach((player, playerId) => {
+      if (player.points > maxPoints) {
+        maxPoints = player.points;
+        overallWinner = playerId;
+      }
     });
 
-    console.log(`Reflex Click ended. Winner: ${winnerId || 'none'}`);
+    // Finale Ergebnisse senden
+    const finalResult = {
+      type: 'reflexClick',
+      winnerId: overallWinner,
+      maxPoints: maxPoints,
+      allPlayerIds: Array.from(this.players.keys()),
+      playerResults: this.getFinalPlayerResults(),
+      roundWinners: this.roundWinners,
+      message: overallWinner ? `${overallWinner} wins the Reflex Challenge with ${maxPoints} points!` : 'No overall winner!'
+    };
+
+    this.io.to(this.roomId).emit('minigameResult', finalResult);
+
+    console.log(`Reflex Click minigame ended. Overall winner: ${overallWinner || 'none'} with ${maxPoints} points`);
+  }
+
+  // Hole Runden-Ergebnisse für alle Spieler
+  getRoundPlayerResults() {
+    const results = {};
+    this.players.forEach((player, playerId) => {
+      const roundResult = player.roundResults.find(r => r.round === this.currentRound);
+      results[playerId] = {
+        hasClicked: player.hasClicked,
+        roundResult: roundResult || { result: 'noClick' },
+        points: player.points,
+        eliminated: !!player.eliminatedInRound
+      };
+    });
+    return results;
+  }
+
+  // Hole finale Ergebnisse für alle Spieler
+  getFinalPlayerResults() {
+    const results = {};
+    this.players.forEach((player, playerId) => {
+      results[playerId] = {
+        totalPoints: player.points,
+        roundResults: player.roundResults,
+        eliminatedInRound: player.eliminatedInRound,
+        roundsWon: this.roundWinners.filter(w => w.playerId === playerId).length
+      };
+    });
+    return results;
   }
 
   // Aufräumen
@@ -168,16 +334,22 @@ function setupReflexClickHandlers(io, socket, roomGames) {
   socket.on('startMinigame', (data) => {
     const { roomId, type } = data;
     
+    console.log(`Server: Received startMinigame request. RoomId: ${roomId}, Type: ${type}, SocketId: ${socket.id}`);
+    
     if (type !== 'reflexClick') {
+      console.log(`Server: Wrong minigame type: ${type}`);
       return;
     }
 
     // Prüfe ob Raum existiert
     const room = io.sockets.adapter.rooms.get(roomId);
     if (!room) {
+      console.log(`Server: Room ${roomId} not found`);
       socket.emit('error', { message: 'Room not found' });
       return;
     }
+
+    console.log(`Server: Room ${roomId} found with ${room.size} players`);
 
     // Erstelle neues Spiel oder hole bestehendes
     if (!roomGames.has(roomId)) {
@@ -187,10 +359,13 @@ function setupReflexClickHandlers(io, socket, roomGames) {
     const game = new ReflexClickGame(io, roomId);
     roomGames.get(roomId).set('reflexClick', game);
 
+    console.log(`Server: Created new ReflexClickGame for room ${roomId}`);
+
     // Füge alle Spieler im Raum hinzu
     room.forEach(socketId => {
       const playerSocket = io.sockets.sockets.get(socketId);
       if (playerSocket && playerSocket.playerId) {
+        console.log(`Server: Adding player ${playerSocket.playerId} to game`);
         game.addPlayer(playerSocket.playerId, socketId);
       }
     });
@@ -199,13 +374,16 @@ function setupReflexClickHandlers(io, socket, roomGames) {
     const started = game.startGame();
     
     if (!started) {
+      console.log(`Server: Failed to start game for room ${roomId}`);
       socket.emit('error', { message: 'Could not start game' });
+    } else {
+      console.log(`Server: Successfully started game for room ${roomId}`);
     }
   });
 
   // Klick-Versuch
   socket.on('clickAttempt', (data) => {
-    const { roomId } = data;
+    const { roomId, timestamp } = data;
     const playerId = socket.playerId;
 
     if (!playerId || !roomId) {
@@ -222,7 +400,7 @@ function setupReflexClickHandlers(io, socket, roomGames) {
       return;
     }
 
-    game.handleClickAttempt(playerId, socket.id);
+    game.handleClickAttempt(playerId, socket.id, timestamp);
   });
 
   // Spieler verlässt Raum
@@ -257,3 +435,14 @@ module.exports = {
   ReflexClickGame,
   setupReflexClickHandlers
 };
+
+// Integration in existing SocketEvents.js:
+/*
+const { setupReflexClickHandlers } = require('./ReflexClickMinigame');
+
+// In SocketEvents constructor:
+this.roomGames = new Map(); // roomId -> Map(gameType -> gameInstance)
+
+// In handleConnection method, add:
+setupReflexClickHandlers(this.io, socket, this.roomGames);
+*/
