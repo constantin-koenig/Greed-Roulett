@@ -6,6 +6,7 @@ import PlayersSection from './PlayersSection';
 import SpinResults from './SpinResults';
 import MinigameScoreboard from './MinigameScoreboard';
 import DeathWheelModal from './DeathWheelModal';
+import SpectatorFeatures from './SpectatorFeatures';
 import GameModals from './GameModals';
 import ReflexClickGame from './ReflexClickGame';
 import RoundStatus from './RoundStatus';
@@ -62,13 +63,6 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
       );
     });
 
-    // NEW: Listen for spin start events
-    socket.on('spinStarted', (data) => {
-      console.log('Spin started:', data);
-      // The animation will be handled in the DeathWheelModal
-      // We could show a toast notification here if desired
-    });
-
     socket.on('spinResult', (data) => {
       setRecentSpinResults(prev => [...prev, data]);
       setSpinResults(prev => [...prev, data]);
@@ -105,27 +99,6 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
           setRecentSpinResults([]);
         }
       }, 3000);
-    });
-
-    // NEW: Listen for next spinner events
-    socket.on('nextSpinner', (data) => {
-      console.log('Next spinner:', data);
-      const nextPlayer = safePlayers.find(p => p._id === data.currentSpinner);
-      if (nextPlayer) {
-        setCurrentSpinner(nextPlayer);
-      }
-    });
-
-    // NEW: Listen for death wheel completion
-    socket.on('deathWheelComplete', (data) => {
-      console.log('Death wheel complete:', data);
-      setTimeout(() => {
-        setShowDeathWheel(false);
-        setCurrentSpinner(null);
-        setSpinQueue([]);
-        setRecentSpinResults([]);
-        setRoundPhase('results');
-      }, 2000);
     });
 
     socket.on('roundEnd', (data) => {
@@ -190,7 +163,40 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
         setCurrentSpinner(loserPlayers[0]);
         setShowDeathWheel(true);
         setRoundPhase('spinning');
+        setRecentSpinResults([]); // Clear previous results
       }
+    });
+
+    // NEW: Listen for spin started event
+    socket.on('spinStarted', (data) => {
+      console.log('Spin started:', data);
+      // This will trigger the spinning animation for all viewers
+      setRecentSpinResults(prev => [...prev, { type: 'spinStarted', ...data }]);
+    });
+
+    // NEW: Listen for next spinner
+    socket.on('nextSpinner', (data) => {
+      console.log('Next spinner:', data);
+      const nextPlayer = safePlayers.find(p => p._id === data.currentSpinner);
+      if (nextPlayer) {
+        setCurrentSpinner(nextPlayer);
+        // Clear recent results for new spinner
+        setTimeout(() => {
+          setRecentSpinResults([]);
+        }, 1000);
+      }
+    });
+
+    // NEW: Listen for death wheel complete
+    socket.on('deathWheelComplete', (data) => {
+      console.log('Death wheel complete:', data);
+      setTimeout(() => {
+        setShowDeathWheel(false);
+        setCurrentSpinner(null);
+        setSpinQueue([]);
+        setRecentSpinResults([]);
+        setRoundPhase('results');
+      }, 2000);
     });
 
     socket.on('playerReady', (data) => {
@@ -199,15 +205,15 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
 
     return () => {
       socket.off('playerX2Updated');
-      socket.off('spinStarted');
       socket.off('spinResult');
-      socket.off('nextSpinner');
-      socket.off('deathWheelComplete');
       socket.off('roundEnd');
       socket.off('gameEnded');
       socket.off('minigameStarted');
       socket.off('minigameResult');
       socket.off('deathWheelPhase');
+      socket.off('spinStarted');
+      socket.off('nextSpinner');
+      socket.off('deathWheelComplete');
       socket.off('playerReady');
     };
   }, [socket, playerId, safePlayers, spinQueue]);
@@ -517,6 +523,15 @@ const GameScreen = ({ socket, lobby, playerId, currentRound, onBackToMenu }) => 
 
       {/* Spin Results History */}
       <SpinResults spinResults={spinResults} players={safePlayers} />
+
+      {/* Spectator Features - Only show when death wheel is active and player is not spinning */}
+      <SpectatorFeatures
+        isSpectator={showDeathWheel && currentSpinner?._id !== playerId}
+        currentSpinner={currentSpinner}
+        isVisible={showDeathWheel}
+        spinQueue={spinQueue}
+        recentSpins={recentSpinResults}
+      />
 
       {/* Death Wheel Modal - Only shown when needed */}
       <DeathWheelModal

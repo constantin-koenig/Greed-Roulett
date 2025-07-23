@@ -160,10 +160,12 @@ class SocketEvents {
       this.io.to(socket.lobbyCode).emit('spinStarted', {
         playerId: player._id,
         playerName: player.name,
-        message: `${player.name} is spinning the wheel...`
+        message: `${player.name} is spinning the wheel!`
       });
 
-      // Add a small delay for dramatic effect
+      // Simulate spinning delay (2-4 seconds for drama)
+      const spinDelay = 2000 + Math.random() * 2000;
+      
       setTimeout(async () => {
         // Spin the death wheel
         const result = this.deathWheel.spin(lobby.deathWheel);
@@ -208,9 +210,11 @@ class SocketEvents {
           livesLost: livesLost,
           newLives: player.lives,
           isAlive: player.isAlive,
-          deathWheelState: lobby.deathWheel
+          deathWheelState: lobby.deathWheel,
+          spinnerName: player.name
         };
         
+        // NEW: Send result to ALL players in the room
         this.io.to(socket.lobbyCode).emit('spinResult', spinData);
 
         // Update death wheel queue
@@ -220,29 +224,34 @@ class SocketEvents {
           
           if (lobbyQueue.queue.length > 0) {
             // Move to next spinner
-            lobbyQueue.currentSpinner = lobbyQueue.queue[0];
+            const nextSpinnerId = lobbyQueue.queue[0];
+            const nextSpinner = await Player.findById(nextSpinnerId);
+            lobbyQueue.currentSpinner = nextSpinnerId;
             
-            // Find next player
-            const nextPlayer = await Player.findById(lobbyQueue.currentSpinner);
-            
-            this.io.to(socket.lobbyCode).emit('nextSpinner', {
-              currentSpinner: lobbyQueue.currentSpinner,
-              currentSpinnerName: nextPlayer ? nextPlayer.name : 'Unknown',
-              remaining: lobbyQueue.queue.length,
-              message: `${nextPlayer ? nextPlayer.name : 'Next player'}'s turn to spin!`
-            });
+            // NEW: Notify about next spinner with delay
+            setTimeout(() => {
+              this.io.to(socket.lobbyCode).emit('nextSpinner', {
+                currentSpinner: nextSpinnerId,
+                currentSpinnerName: nextSpinner?.name || 'Unknown',
+                remaining: lobbyQueue.queue.length,
+                message: `${nextSpinner?.name || 'Next player'}'s turn to spin!`
+              });
+            }, 3000); // 3 second delay to show result
           } else {
             // All spins complete
             this.deathWheelQueues.delete(lobby._id.toString());
-            this.io.to(socket.lobbyCode).emit('deathWheelComplete', {
-              message: 'Death wheel phase complete!'
-            });
             
-            // Check if round/game should end
-            await this.gameEngine.checkRoundEnd(lobby);
+            setTimeout(() => {
+              this.io.to(socket.lobbyCode).emit('deathWheelComplete', {
+                message: 'Death wheel phase complete!'
+              });
+              
+              // Check if round/game should end
+              this.gameEngine.checkRoundEnd(lobby);
+            }, 3000);
           }
         }
-      }, 1500); // 1.5 second delay for dramatic effect
+      }, spinDelay);
       
     } catch (error) {
       socket.emit('error', { message: 'Failed to spin wheel', error: error.message });

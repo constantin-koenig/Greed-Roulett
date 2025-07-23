@@ -25,44 +25,39 @@ const DeathWheelModal = ({
     }
   }, [isVisible]);
 
-  // Handle spin result - also triggers animation for spectators
+  // Handle spin result
   useEffect(() => {
     if (spinResults && spinResults.length > 0) {
       const latestResult = spinResults[spinResults.length - 1];
       if (latestResult && !currentResult) {
         setCurrentResult(latestResult);
         setShowResult(true);
-        
-        // Stop spinning animation when result arrives
-        setIsSpinning(false);
       }
     }
   }, [spinResults, currentResult]);
 
-  // NEW: Listen for spin start events from other players
+  // Listen for other players' spins
   useEffect(() => {
-    if (isVisible && currentSpinner && !isMyTurn) {
-      // Start spectator animation when someone else spins
-      const handleSpinStart = () => {
-        if (!isSpinning) {
-          startSpinAnimation();
-        }
-      };
-
-      // Check if we should start animation based on spinner change
-      if (currentSpinner && !showResult) {
-        // Small delay to ensure we're ready
-        const timer = setTimeout(() => {
-          if (!isSpinning && !showResult) {
-            // Auto-start animation for spectators after a moment
-            startSpinAnimation();
-          }
-        }, 1000);
-
-        return () => clearTimeout(timer);
+    if (!isMyTurn && currentSpinner && isVisible) {
+      // Listen for spin started events to trigger animation for spectators
+      const latestResult = spinResults && spinResults.length > 0 ? 
+        spinResults[spinResults.length - 1] : null;
+      
+      if (latestResult && latestResult.type === 'spinStarted' && !isSpinning) {
+        setIsSpinning(true);
+        
+        // Random spin animation for spectators
+        const rotations = 3 + Math.random() * 4;
+        const finalRotation = spinRotation + (rotations * 360) + (Math.random() * 360);
+        setSpinRotation(finalRotation);
+        
+        // Stop spinning after 3 seconds
+        setTimeout(() => {
+          setIsSpinning(false);
+        }, 3000);
       }
     }
-  }, [currentSpinner, isMyTurn, isVisible, showResult, isSpinning]);
+  }, [spinResults, currentSpinner, isMyTurn, isVisible, isSpinning, spinRotation]);
 
   if (!isVisible) return null;
 
@@ -72,8 +67,9 @@ const DeathWheelModal = ({
     bonusFields: 0
   };
 
-  // Spin animation function
-  const startSpinAnimation = () => {
+  const handleSpin = () => {
+    if (!isMyTurn || isSpinning) return;
+    
     setIsSpinning(true);
     
     // Random spin animation (3-7 full rotations plus random angle)
@@ -81,21 +77,13 @@ const DeathWheelModal = ({
     const finalRotation = spinRotation + (rotations * 360) + (Math.random() * 360);
     setSpinRotation(finalRotation);
     
-    // Stop spinning animation after 3 seconds if no result yet
-    setTimeout(() => {
-      if (!showResult) {
-        setIsSpinning(false);
-      }
-    }, 3000);
-  };
-
-  const handleSpin = () => {
-    if (!isMyTurn || isSpinning) return;
-    
-    startSpinAnimation();
-    
     // Call the actual spin function
     onSpin();
+    
+    // Stop spinning animation after 3 seconds
+    setTimeout(() => {
+      setIsSpinning(false);
+    }, 3000);
   };
 
   const getWheelFields = () => {
@@ -226,7 +214,7 @@ const DeathWheelModal = ({
             {isMyTurn ? '🎯 Your Turn!' : `🎮 ${currentSpinner?.name || 'Unknown'}'s Turn`}
           </h2>
           
-          {isMyTurn && (
+          {isMyTurn && !isSpinning && (
             <p style={{
               margin: 0,
               color: '#1976d2',
@@ -237,13 +225,35 @@ const DeathWheelModal = ({
             </p>
           )}
           
-          {!isMyTurn && (
+          {isMyTurn && isSpinning && (
+            <p style={{
+              margin: 0,
+              color: '#ff9800',
+              fontSize: '16px',
+              fontWeight: '500'
+            }}>
+              🎰 Spinning... Hold your breath!
+            </p>
+          )}
+          
+          {!isMyTurn && !isSpinning && (
             <p style={{
               margin: 0,
               color: '#666',
               fontSize: '16px'
             }}>
-              Watch as {currentSpinner?.name || 'the player'} spins the wheel...
+              Watch as {currentSpinner?.name || 'the player'} prepares to spin...
+            </p>
+          )}
+
+          {!isMyTurn && isSpinning && (
+            <p style={{
+              margin: 0,
+              color: '#ff9800',
+              fontSize: '16px',
+              fontWeight: '500'
+            }}>
+              🎰 {currentSpinner?.name || 'Player'} is spinning the wheel!
             </p>
           )}
         </div>
@@ -347,7 +357,7 @@ const DeathWheelModal = ({
           }} />
 
           {/* Spin Indicator */}
-          {isMyTurn && !isSpinning && (
+          {isMyTurn && !isSpinning && !showResult && (
             <div style={{
               position: 'absolute',
               top: '50%',
@@ -361,7 +371,8 @@ const DeathWheelModal = ({
               fontWeight: 'bold',
               zIndex: 20,
               animation: 'pulse 2s infinite',
-              boxShadow: '0 4px 15px rgba(33, 150, 243, 0.4)'
+              boxShadow: '0 4px 15px rgba(33, 150, 243, 0.4)',
+              cursor: 'pointer'
             }}>
               CLICK TO SPIN
             </div>
@@ -374,16 +385,39 @@ const DeathWheelModal = ({
               top: '50%',
               left: '50%',
               transform: 'translate(-50%, -50%)',
-              backgroundColor: 'rgba(255, 152, 0, 0.9)',
+              backgroundColor: 'rgba(255, 152, 0, 0.95)',
+              color: 'white',
+              padding: '20px 30px',
+              borderRadius: '50px',
+              fontSize: '20px',
+              fontWeight: 'bold',
+              zIndex: 20,
+              boxShadow: '0 8px 25px rgba(255, 152, 0, 0.6)',
+              animation: 'pulse 1s infinite',
+              border: '3px solid rgba(255, 255, 255, 0.3)'
+            }}>
+              {isMyTurn ? '🎰 SPINNING...' : `🎰 ${currentSpinner?.name || 'PLAYER'} SPINNING...`}
+            </div>
+          )}
+
+          {/* Spectator Waiting Indicator */}
+          {!isMyTurn && !isSpinning && !showResult && (
+            <div style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              backgroundColor: 'rgba(156, 39, 176, 0.9)',
               color: 'white',
               padding: '15px 25px',
               borderRadius: '50px',
-              fontSize: '18px',
+              fontSize: '16px',
               fontWeight: 'bold',
               zIndex: 20,
-              boxShadow: '0 4px 15px rgba(255, 152, 0, 0.4)'
+              animation: 'pulse 3s infinite',
+              boxShadow: '0 4px 15px rgba(156, 39, 176, 0.4)'
             }}>
-              SPINNING...
+              👀 WATCHING...
             </div>
           )}
         </div>
@@ -542,11 +576,30 @@ const DeathWheelModal = ({
               </>
             ) : (
               <>
-                👀 <strong>Spectating:</strong> Watch as other players face the wheel.
+                👀 <strong>Spectating:</strong> Watch as {currentSpinner?.name || 'the player'} faces the wheel.
                 <br />
-                ⏳ Wait for your turn or the round to complete.
+                🎭 <strong>Live Action:</strong> You'll see the wheel spin in real-time!
               </>
             )}
+          </div>
+        )}
+
+        {/* Live Viewer Count (Mock) */}
+        {!isMyTurn && (
+          <div style={{
+            marginTop: '15px',
+            textAlign: 'center',
+            fontSize: '12px',
+            color: '#999',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '5px'
+          }}>
+            <span style={{ color: '#f44336' }}>🔴</span>
+            <span>LIVE</span>
+            <span>•</span>
+            <span>👥 {Math.floor(Math.random() * 5) + 2} watching</span>
           </div>
         )}
       </div>
